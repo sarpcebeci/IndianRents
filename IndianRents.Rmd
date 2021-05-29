@@ -1,0 +1,525 @@
+---
+title: "India_REnt"
+author: "sdc"
+date: "5/28/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+library(tidyverse)
+library(rvest)
+library(broom)
+```
+
+
+# Data
+
+comes from: https://www.kaggle.com/saisaathvik/house-rent-prices-of-metropolitan-cities-in-india 
+A great web scraping project. 
+
+
+```{r, include=FALSE}
+setwd("~/Coding/R/india_rent")
+Ahmedabad_rent <- read_csv("Ahmedabad_rent.csv") %>% mutate(city = "Ahmedabad")
+Bangalore_rent <- read_csv("Bangalore_rent.csv") %>% mutate(city = "Bangalore")
+Chennai_rent <- read_csv("Chennai_rent.csv")%>% mutate(city = "Chennai")
+Delhi_rent <- read_csv("Delhi_rent.csv")%>% mutate(city = "Delhi")
+Hyderabad_rent <- read_csv("Hyderabad_rent.csv")%>% mutate(city = "Hyderabad")
+Kolkata_rent <- read_csv("Kolkata_rent.csv")%>% mutate(city = "Kolkata")
+Mumbai_rent <- read_csv("Mumbai_rent.csv")%>% mutate(city = "Mumbai")
+Pune_rent <- read_csv("Pune_rent.csv")%>% mutate(city = "Pune")
+
+cities <- c("Ahmedabad", "Bangalore", "Chennai", "Delhi",
+            "Hyderabad", "Kolkata", "Mumbai", "Pune")
+```
+
+## Scraping for Population and GDP pc Data
+
+### City GDPs
+
+Even Though, Cities have huge effects (explains more, as you will see at the end) actually the underlying effect comes from GDP of the city and its population. 
+
+To get the gdp per capita and population per city, a little web scraping made from the wikipedia
+
+```{r}
+url <- "https://en.wikipedia.org/wiki/List_of_cities_by_GDP"
+wiki_scrape_list <- url %>% 
+  read_html() %>% 
+  html_table(fill = T)
+
+wiki_city_df <- wiki_scrape_list[[1]]
+
+colnames(wiki_city_df) <- c("City", "Country", "Region", "GDP_", "Brookings") 
+
+sev_city <- wiki_city_df %>% 
+  filter(City %in% cities) %>% 
+  rename(GDP = Brookings) %>% 
+  select(City, GDP) %>% 
+  separate(GDP, into = c("GDP", "Trash"), sep = "\\[") %>% 
+  select(-Trash) %>% 
+  mutate(GDP = as.double(GDP),
+         GDP = GDP * 1e9)
+
+sev_city
+```
+
+
+Only Bangalore is missing. But it is available at: https://en.wikipedia.org/wiki/List_of_Indian_cities_by_GDP_per_capita 
+
+```{r}
+url <- "https://en.wikipedia.org/wiki/List_of_Indian_cities_by_GDP_per_capita"
+wiki_top_six_list <- url %>% 
+  read_html() %>% 
+  html_table(fill = T)
+
+wiki_top_six_df <- wiki_top_six_list[[1]]
+colnames(wiki_top_six_df) <- c("Rank", "City", "State", "GDP_pc", "tr")
+
+top_six <- wiki_top_six_df %>% 
+  select(City, GDP_pc) %>% 
+  mutate(GDP_pc = parse_number(GDP_pc))
+
+top_six
+```
+
+
+### City Populations
+
+Since the top_six is in terms of per capita we need population data to get all cities.
+Note: The years of population and Gdp data come from different years. I assumed there was no demographic changes so the difference of these metropolitians stayed same.
+
+```{r}
+url <- "https://en.wikipedia.org/wiki/List_of_cities_in_India_by_population"
+wiki_pop_list <- url %>% 
+  read_html() %>% 
+  html_table(fill = T)
+
+wiki_pop_df <- wiki_pop_list[[1]]
+
+colnames(wiki_pop_df) <- c("Rank", "City", "Pop", "Pop01", "State")
+```
+
+
+Now all the cities data is available. The missing value of Bangalore found with average of the ratio. 
+This requires another assumption of the share of the Bangalore did not changed over time. 
+
+```{r}
+main_tbl0 <- wiki_pop_df %>% 
+  filter(City %in% cities) %>%
+  left_join(., sev_city) %>% 
+  left_join(., top_six) %>% 
+  mutate(Pop = parse_number(Pop),
+         GDP2 = GDP_pc * Pop) 
+
+average <- main_tbl0 %>% 
+  filter(City != "Bangalore") %>%
+  pull(GDP2) %>%
+  summary() %>% 
+  tidy() %>% 
+  pull(mean)
+
+Bangalore <- main_tbl0 %>% 
+  filter(City == "Bangalore") %>% 
+  pull(GDP2)
+
+Ratio <- Bangalore / average
+
+cities_gdp_pc <- main_tbl0 %>% 
+  mutate(GDP = if_else(
+    City == "Bangalore", 
+    mean(main_tbl0$GDP, na.rm = T) * Ratio, 
+    GDP),
+    GDP_pc = GDP / Pop
+  ) %>% 
+  select(City, Pop, GDP_pc)
+
+cities_gdp_pc
+```
+
+
+### Combine All The Cities
+
+And a sample from the data before starting to the analysis
+
+```{r}
+combined <- rbind(Ahmedabad_rent,
+      Bangalore_rent,
+      Chennai_rent,
+      Delhi_rent,
+      Hyderabad_rent,
+      Kolkata_rent,
+      Mumbai_rent,
+      Pune_rent)
+
+colnames(combined) <- c("seller", "bedroom", "layout", "property",
+                        "locality", "price", "area", "furnish", "bathroom",
+                        "City")
+
+analysis_tbl <- combined %>% 
+  left_join(., cities_gdp_pc) %>% 
+  mutate(bathroom = as.double(str_remove(bathroom, " bathrooms")),
+         furnish = as.factor(str_replace(furnish, "-", "_")),
+         layout = as.factor(layout),
+         locality = as.factor(locality),
+         City = as.factor(City))
+
+analysis_tbl %>% sample_n(10)
+```
+
+## Analysis
+
+There are two types of missing value: 
+- All obs are missing except the city 
+- Only bathroom missing
+
+First ones can't be recovered but second one's, bathroom values, can be guessed
+
+```{r}
+analysis_tbl %>% 
+  sample_n(10000) %>% 
+  visdat::vis_dat()
+```
+
+### Same Obs with Only the City Var.
+
+First type of NAs have been seen in three cities:
+
+It is important to note these cities since only three cities are containing these missing values. 
+
+```{r}
+analysis_tbl %>% 
+  filter(is.na(furnish)) %>% 
+  count(City)
+```
+
+Excluding 1061 observations
+
+```{r}
+analysis_tbl1 <- analysis_tbl %>% 
+  filter(!is.na(furnish))
+```
+
+
+Before dealing with the missing bathroom values, there is an important issue in the data. 
+
+### Incorrect Price Values
+
+There are some obs between 0-30? 
+Other than that price has right-skewed distribution since there may be extravagant houses
+
+```{r}
+analysis_tbl1 %>% 
+  ggplot(aes(price)) + 
+  geom_histogram()
+```
+
+Logarithm transformation seems good but ones between 0-30 looks odd! 
+They look like another cluster!
+
+```{r}
+analysis_tbl1 %>% 
+  ggplot(aes(log(price))) + 
+  geom_histogram()
+```
+
+These are actually good houses. Huge areas, lots of bathrooms. 
+There is a measurement error.
+
+```{r}
+analysis_tbl1 %>% 
+  filter(price < 100) %>% 
+  sample_n(20)
+```
+
+Yes these might be scraped wrong. Since it just writes 2.5 at the CSVs also. 
+
+
+```{r}
+analysis_tbl1 %>% 
+  filter(area == 6732)
+```
+
+
+At the site it look like this:
+
+https://www.makaan.com/ahmedabad/builder-narayan-chambers-in-ashram-road-13778384/10bhk-2t-6732-sqft-apartment-for-rent
+
+It says 2.5L What does that mean? 
+
+https://www.indiamike.com/india/money-issues-and-india-travel-f138/is-200-000-irp-per-month-a-good-salary-in-bangalore-t123164/#post1089587
+
+These guys say that:
+2 lacs per month (200,000 INR) means your are going to live a royal life in banglore. Its more than enough in India
+
+But how the area distributed in the dataset? 
+
+```{r}
+analysis_tbl1 %>% 
+  ggplot(aes(area)) + 
+  geom_histogram()
+```
+
+Ok it is logical to have this high rents then especially with 6732 
+
+Let's assume for all values price < 100 they must be multiplied with 1e5
+
+```{r}
+analysis_tbl1_2 <- analysis_tbl1 %>% 
+  mutate(
+    price = if_else(price < 100, price * 1e5, price),
+    lprice = log(price),
+    larea = log(area)
+  )
+```
+
+
+
+These values can be estimated:
+
+```{r include=FALSE}
+analysis_tbl1 <- analysis_tbl1_2
+```
+
+
+```{r}
+analysis_tbl1 %>% 
+  filter(is.na(bathroom)) %>% 
+  sample_n(10) 
+```
+
+I assume that bathroom number can be explained with area, 
+price, and bedroom
+
+
+```{r}
+lm_model <- analysis_tbl1 %>% 
+  filter(!is.na(bathroom)) %>% 
+  lm(data = .,
+     formula = bathroom ~ area + I(area^2) + price + I(price^2) + bedroom + I(bedroom^2))
+
+lm_model %>% 
+  summary()
+
+estimates <- lm_model %>% 
+  tidy() %>% 
+  pull(estimate)
+  
+```
+
+
+Adj. R square is not bad. Let's implement these to the main table
+
+
+```{r}
+analysis_tbl2 <- analysis_tbl1 %>% 
+  mutate(
+    bathroom_imputed = if_else(
+      is.na(bathroom), 1, 0
+    ),
+    bathroom = if_else(
+      is.na(bathroom), 
+      estimates[1] + estimates[2] * area + estimates[3] * area^2 + 
+        estimates[4] * price + estimates[5] * price^2 + 
+        estimates[6] * bedroom + estimates[7] * bedroom^2,
+      bathroom
+    ),
+    bathroom = round(bathroom, 0)
+  )
+```
+
+
+#### How the imputed ones look? 
+
+```{r}
+analysis_tbl2 %>% 
+  ggplot(aes(bathroom, bedroom,color = as.factor(bathroom_imputed))) + 
+  geom_jitter(alpha = .5) 
+```
+
+
+### Understanding The Variables
+
+
+Again let's look at again the distribution of the price and the other variables
+
+```{r include=FALSE}
+analysis_tbl3 <- analysis_tbl2
+```
+
+
+
+```{r}
+analysis_tbl3 %>% 
+  mutate(row_no = row_number()) %>% 
+  pivot_longer(cols = c(bedroom, lprice, larea, bathroom)) %>% 
+  ggplot(aes(value, fill = as.factor(name))) + 
+  geom_histogram() +
+  facet_wrap(~name, scales = "free", nrow = 2) + 
+  labs(title = "Dataset's Variables Distribution",
+       y = "", x = "") + 
+  theme(legend.position = "none")
+```
+
+### Look to the Categorical Variables
+
+Some localities are very common but also there are lots locality with only 1 observation
+
+```{r}
+analysis_tbl3 %>% 
+  count(locality) %>% 
+  arrange(desc(n)) %>% 
+  head(20)
+
+analysis_tbl3 %>% 
+  count(locality) %>% 
+  arrange(desc(n)) %>% 
+  tail(20)
+
+```
+
+Mostly from agent, and the owner
+
+```{r}
+analysis_tbl3 %>% 
+  count(seller)
+```
+
+
+BHK: Bedroom Hall Kitchen
+RK: 1 room that combines bedroom hall and separate kitchen
+
+```{r}
+analysis_tbl3 %>% 
+  count(layout)
+```
+
+
+```{r}
+analysis_tbl3 %>% 
+  count(furnish)
+```
+
+
+```{r}
+analysis_tbl3 %>% 
+  count(City)
+```
+
+```{r}
+analysis_tbl3 %>% 
+  count(property)
+```
+
+
+
+
+## Linear Regression
+
+### Selecting Base Level's of The Categorical Variables
+
+```{r}
+analysis_tbl4 <- analysis_tbl3 %>% 
+  mutate(
+    seller = fct_relevel(as.factor(seller), "AGENT"),
+    City = fct_relevel(City, "Mumbai"),
+    furnish = fct_relevel(furnish, "Semi_Furnished"),
+    property = fct_relevel(property, "Apartment"),
+    lPop = log(Pop), 
+    lGdp = log(GDP_pc)
+  )
+```
+
+
+```{r}
+linear_reg <- analysis_tbl4 %>% 
+  lm(data = .,
+     formula = lprice ~ seller + bedroom + I(bedroom^2) +  
+       property + furnish + larea + City + bathroom + I(bathroom^2)) 
+```
+
+
+```{r}
+linear_reg %>% summary()
+```
+
+
+### Reporting Without Categorical Variables
+
+```{r}
+linear_reg %>% 
+  stargazer::stargazer(type = "text", keep = c("area", "bedroom", "bathroom"))
+```
+
+
+
+```{r}
+linear_reg %>% 
+  tidy(conf.int = T) %>% 
+  select(term, estimate, conf.low, conf.high) %>% 
+  mutate(categorical = case_when(
+    str_detect(term, "seller") ~ "seller",
+    str_detect(term, "property") ~ "property", 
+    str_detect(term, "furnish") ~ "furnish",
+    str_detect(term, "City") ~ "City",
+    TRUE ~ "numerical"),
+    term = str_remove(term, "seller"),
+    term = str_remove(term, "property"),
+    term = str_remove(term, "City"),
+    term = str_remove(term, "furnish"),
+  ) %>% 
+  filter(!categorical == "numerical") %>% 
+  ggplot() + 
+  geom_errorbar(aes(x = term, ymin = conf.low, ymax = conf.high, width = .2)) + 
+  geom_point(aes(x = term, y = estimate, color = "red")) + 
+  facet_wrap(~ categorical, scales = "free") + 
+  geom_hline(yintercept = 0, color = "red", linetype = 2) + 
+  labs(y = "", x = "") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "none") + 
+  coord_flip()
+    
+    
+```
+
+
+### Instead of City Variables...
+
+One may argue that Mumbai is the largest city and the effect comes from its largeness. 
+Then let' change the model
+
+```{r}
+linear_reg2 <- analysis_tbl4 %>% 
+  lm(data = .,
+     formula = lprice ~ seller + bedroom + I(bedroom^2) +  
+       property + furnish + larea + bathroom + I(bathroom^2)+ 
+       lPop + lGdp) 
+```
+
+
+```{r}
+linear_reg2 %>% 
+  stargazer::stargazer(type = "text", keep = c("area", "bedroom", "bathroom", "Pop", "Gdp", "Constant"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
